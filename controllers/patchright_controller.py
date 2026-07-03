@@ -7,6 +7,16 @@ from utils import capture_page_state, check_captcha_type
 
 class PatchrightController(BaseBrowserController):
 
+    _stealth_script = """
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+    Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh'] });
+    window.chrome = { runtime: {} };
+    """
+
+    def _apply_stealth(self, context):
+        context.add_init_script(self._stealth_script)
+
     def launch_browser(self):
         try:
             p = sync_playwright().start() 
@@ -18,7 +28,11 @@ class PatchrightController(BaseBrowserController):
 
             b = p.chromium.launch(
                 headless=False,            
-                args=['--lang=zh-CN'],
+                args=[
+                    '--lang=zh-CN',
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-infobars',
+                ],
                 proxy=proxy_settings
             )
 
@@ -93,6 +107,7 @@ class PatchrightController(BaseBrowserController):
     def get_thread_page(self):
         browser = self.get_thread_browser()
         context = browser.new_context()
+        self._apply_stealth(context)
         return context.new_page()
 
     def clean_up(self, page=None, type="all_browser"):
