@@ -29,6 +29,7 @@ def process_single_flow(controller):
         result = controller.outlook_register(page, email, password)
 
         if result and not controller.enable_oauth2:
+            controller.clean_up(page, "done_browser")
             return True
         elif not result:
             return False
@@ -39,6 +40,7 @@ def process_single_flow(controller):
             with open(os.path.join(os.path.dirname(__file__), 'Results', 'outlook_token.txt'), 'a', encoding='utf-8') as f2:
                 f2.write(f"{email}{controller.email_suffix}---{password}---{refresh_token}---{access_token}---{expire_at}\n") 
             print(f'[Success: TokenAuth] - {email}{controller.email_suffix}')
+            controller.clean_up(page, "done_browser")
             return True
         else:
             return False
@@ -46,10 +48,6 @@ def process_single_flow(controller):
     except Exception as e:
         print(e)
         return False
-    
-    finally:
-
-        controller.clean_up(page, "done_browser")
 
 def run_concurrent_flows(controller, concurrent_flows=10, max_tasks=100):
     task_counter = 0
@@ -84,6 +82,7 @@ def run_concurrent_flows(controller, concurrent_flows=10, max_tasks=100):
             time.sleep(0.5)
 
     print(f"\n[Result] - 共: {max_tasks}, 成功 {succeeded_tasks}, 失败 {failed_tasks}")
+    return succeeded_tasks, failed_tasks
 
 
 if __name__ == "__main__":
@@ -104,6 +103,10 @@ if __name__ == "__main__":
   
 
     try:
-        run_concurrent_flows(selected_controller, concurrent_flows, max_tasks)
+        succeeded, failed = run_concurrent_flows(selected_controller, concurrent_flows, max_tasks)
+    except:
+        succeeded, failed = 0, max_tasks
     finally:
+        if failed > 0 and succeeded < max_tasks:
+            input("\n有任务失败，浏览器已保持打开。检查完毕后按 Enter 键关闭所有浏览器并退出...")
         selected_controller.clean_up(type="all_browser")

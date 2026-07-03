@@ -5,6 +5,7 @@ import random
 import threading
 from faker import Faker
 from abc import ABC, abstractmethod
+from utils import capture_page_state, check_captcha_type
 
 class BaseBrowserController(ABC):
     """
@@ -97,6 +98,7 @@ class BaseBrowserController(ABC):
             page.get_by_text('同意并继续').click(timeout=30000)
         except:
             print("[Error: IP] - IP质量不佳，无法进入注册界面。")
+            capture_page_state(page, "ip_quality")
             return False
 
         try:
@@ -104,33 +106,30 @@ class BaseBrowserController(ABC):
                 page.get_by_text("@outlook.com").click(timeout=10000)
                 page.locator(f'[role="option"]:text-is("@hotmail.com")').click()
 
-            page.locator('[aria-label="新建电子邮件"]').type(email, delay=0.006 * self.wait_time, timeout=10000)
+            page.locator('[aria-label="新建电子邮件"]').type(email, delay=0.015 * self.wait_time, timeout=15000)
+            page.wait_for_timeout(0.03 * self.wait_time)
             page.locator('[data-testid="primaryButton"]').click(timeout=5000)
-            page.wait_for_timeout(0.02 * self.wait_time)
-            page.locator('[type="password"]').type(password, delay=0.004 * self.wait_time, timeout=10000)
-            page.wait_for_timeout(0.02 * self.wait_time)
+            page.wait_for_timeout(0.05 * self.wait_time)
+            page.locator('[type="password"]').type(password, delay=0.01 * self.wait_time, timeout=15000)
+            page.wait_for_timeout(0.05 * self.wait_time)
             page.locator('[data-testid="primaryButton"]').click(timeout=5000)
 
-            page.wait_for_timeout(0.03 * self.wait_time)
+            page.wait_for_timeout(0.06 * self.wait_time)
             page.locator('[name="BirthYear"]').fill(year, timeout=10000)
 
-            try:
-                page.wait_for_timeout(0.02 * self.wait_time)
-                page.locator('[name="BirthMonth"]').select_option(value=month, timeout=1000)
-                page.wait_for_timeout(0.05 * self.wait_time)
-                page.locator('[name="BirthDay"]').select_option(value=day)
-            except:
-                page.locator('[name="BirthMonth"]').click()
-                page.wait_for_timeout(0.02 * self.wait_time)
-                page.locator(f'[role="option"]:text-is("{month}月")').click()
-                page.wait_for_timeout(0.04 * self.wait_time)
-                page.locator('[name="BirthDay"]').click()
-                page.wait_for_timeout(0.03 * self.wait_time)
-                page.locator(f'[role="option"]:text-is("{day}日")').click()
-                page.locator('[data-testid="primaryButton"]').click(timeout=5000)
+            page.locator('[name="BirthMonth"]').click()
+            page.wait_for_timeout(0.04 * self.wait_time)
+            page.locator(f'[role="option"]:text-is("{month}月")').click()
+            page.wait_for_timeout(0.06 * self.wait_time)
+            page.locator('[name="BirthDay"]').click()
+            page.wait_for_timeout(0.05 * self.wait_time)
+            page.locator(f'[role="option"]:text-is("{day}日")').click()
+            page.wait_for_timeout(0.03 * self.wait_time)
+            page.locator('[data-testid="primaryButton"]').click(timeout=5000)
 
-            page.locator('#lastNameInput').type(lastname, delay=0.002 * self.wait_time, timeout=10000)
-            page.wait_for_timeout(0.02 * self.wait_time)
+            page.wait_for_timeout(0.06 * self.wait_time)
+            page.locator('#lastNameInput').type(lastname, delay=0.008 * self.wait_time, timeout=15000)
+            page.wait_for_timeout(0.04 * self.wait_time)
             page.locator('#firstNameInput').fill(firstname, timeout=10000)
 
             if time.time() - start_time < self.wait_time / 1000:
@@ -142,11 +141,18 @@ class BaseBrowserController(ABC):
 
             if page.get_by_text('一些异常活动').count() or page.get_by_text('此站点正在维护，暂时无法使用，请稍后重试。').count() > 0:
                 print("[Error: IP or browser] - 当前IP注册频率过快。检查IP与是否为指纹浏览器并关闭了无头模式。")
+                capture_page_state(page, "rate_limited")
                 return False
 
-            if page.locator('iframe#enforcementFrame').count() > 0:
+            captcha_type = check_captcha_type(page)
+            if captcha_type == 'funcaptcha_iframe':
                 print("[Error: FunCaptcha] - 验证码类型错误，非按压验证码。")
+                capture_page_state(page, "funcaptcha")
                 return False
+
+            if captcha_type == 'longpress':
+                print("[Info] - 检测到长按验证，正在处理...")
+                self._handle_longpress_captcha(page)
 
             captcha_result = self.handle_captcha(page)
             if not captcha_result:
@@ -154,6 +160,7 @@ class BaseBrowserController(ABC):
 
         except Exception:
             print("[Error: IP] - 加载超时或因触发机器人检测导致按压次数达到最大仍未通过。")
+            capture_page_state(page, "timeout_or_bot")
             return False
 
         filename = os.path.join(self.results_dir, 'logged_email.txt' if self.enable_oauth2 else 'unlogged_email.txt')
@@ -164,9 +171,35 @@ class BaseBrowserController(ABC):
         if not self.enable_oauth2:
             return True
 
+    def _handle_longpress_captcha(self, page):
+        try:
+            btn = page.locator('#human > div:first-child')
+            btn.wait_for(state='visible', timeout=10000)
+            box = btn.bounding_box()
+            if not box:
+                return False
+            x = box['x'] + box['width'] / 2
+            y = box['y'] + box['height'] / 2
+            page.mouse.move(x, y)
+            page.wait_for_timeout(500)
+            page.mouse.down()
+            for _ in range(10):
+                page.wait_for_timeout(1000)
+                if check_captcha_type(page) != 'longpress':
+                    page.mouse.up()
+                    page.wait_for_timeout(1500)
+                    return True
+            page.mouse.up()
+            page.wait_for_timeout(1500)
+            return True
+        except Exception as e:
+            print(f"[Debug] 长按异常: {e}")
+            return False
+
         try:
             page.locator('[aria-label="新邮件"]').wait_for(timeout=32000)
             return True
         except:
             print('[Error: Timeout] - 邮箱未初始化，无法正常收件。')
+            capture_page_state(page, "email_init_timeout")
             return False
