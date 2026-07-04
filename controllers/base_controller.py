@@ -172,34 +172,143 @@ class BaseBrowserController(ABC):
             return True
 
     def _handle_longpress_captcha(self, page):
+        """
+        处理 PerimeterX 长按验证码
+        使用 CDP Input API 和贝塞尔曲线模拟真人操作
+        """
         try:
-            btn = page.locator('#human > div:first-child')
-            btn.wait_for(state='visible', timeout=10000)
-            box = btn.bounding_box()
-            if not box:
-                return False
-            x = box['x'] + box['width'] / 2
-            y = box['y'] + box['height'] / 2
-            page.mouse.move(x, y)
-            page.wait_for_timeout(500)
-            page.mouse.down()
-            for _ in range(10):
-                page.wait_for_timeout(1000)
-                if check_captcha_type(page) != 'longpress':
-                    page.mouse.up()
-                    page.wait_for_timeout(1500)
-                    return True
-            page.mouse.up()
-            page.wait_for_timeout(1500)
-            return True
-        except Exception as e:
-            print(f"[Debug] 长按异常: {e}")
+            import random as rnd
+
+            # 获取验证质询 iframe 的位置
+            iframe_info = page.evaluate("""
+            () => {
+                const iframes = document.querySelectorAll('iframe');
+                for (const iframe of iframes) {
+                    if (iframe.title === '验证质询') {
+                        const rect = iframe.getBoundingClientRect();
+                        return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+                    }
+                }
+                return null;
+            }
+            """)
+
+            if not iframe_info:
+                # 回退到原来的逻辑
+                btn = page.locator('#human > div:first-child')
+                btn.wait_for(state='visible', timeout=10000)
+                box = btn.bounding_box()
+                if not box:
+                    return False
+                btn_x = box['x'] + box['width'] / 2
+                btn_y = box['y'] + box['height'] / 2
+            else:
+                # 按钮在 iframe 底部中间
+                btn_x = iframe_info['x'] + iframe_info['width'] / 2
+                btn_y = iframe_info['y'] + iframe_info['height'] - 30
+
+            print(f"  [Captcha] 按钮位置: x={btn_x:.0f}, y={btn_y:.0f}")
+
+            # 使用 CDP session
+            cdp = page.context.new_cdp_session(page)
+
+            # 贝塞尔曲线函数
+            def bezier_curve(t, p0, p1, p2, p3):
+                u = 1 - t
+                return u**3 * p0 + 3*u**2*t * p1 + 3*u*t**2 * p2 + t**3 * p3
+
+            # 1. 从随机位置开始移动
+            start_x = rnd.randint(100, 400)
+            start_y = rnd.randint(100, 300)
+
+            # 2. 生成贝塞尔曲线控制点
+            cp1_x = start_x + (btn_x - start_x) * 0.3 + rnd.uniform(-50, 50)
+            cp1_y = start_y + (btn_y - start_y) * 0.3 + rnd.uniform(-50, 50)
+            cp2_x = start_x + (btn_x - start_x) * 0.7 + rnd.uniform(-50, 50)
+            cp2_y = start_y + (btn_y - start_y) * 0.7 + rnd.uniform(-50, 50)
+
+            # 3. 沿贝塞尔曲线移动鼠标
+            steps = rnd.randint(20, 40)
+            for i in range(steps):
+                t = i / steps
+                x = bezier_curve(t, start_x, cp1_x, cp2_x, btn_x)
+                y = bezier_curve(t, start_y, cp1_y, cp2_y, btn_y)
+
+                # 添加微小的随机抖动
+                x += rnd.uniform(-2, 2)
+                y += rnd.uniform(-2, 2)
+
+                cdp.send("Input.dispatchMouseEvent", {
+                    "type": "mouseMoved",
+                    "x": x,
+                    "y": y,
+                    "button": "none",
+                    "clickCount": 0,
+                    "pointerType": "mouse"
+                })
+
+                time.sleep(rnd.uniform(0.01, 0.05))
+
+            time.sleep(rnd.uniform(0.1, 0.3))
+
+            # 4. 按下鼠标
+            cdp.send("Input.dispatchMouseEvent", {
+                "type": "mousePressed",
+                "x": btn_x,
+                "y": btn_y,
+                "button": "left",
+                "clickCount": 1,
+                "buttons": 1,
+                "pointerType": "mouse"
+            })
+
+            print("  [Captcha] 按住中...")
+
+            # 5. 保持按住，偶尔微调位置
+            hold_time = rnd.uniform(10, 15)
+            start_time = time.time()
+
+            while time.time() - start_time < hold_time:
+                # 偶尔移动鼠标（模拟手抖）
+                if rnd.random() < 0.2:
+                    jitter_x = btn_x + rnd.uniform(-3, 3)
+                    jitter_y = btn_y + rnd.uniform(-3, 3)
+                    cdp.send("Input.dispatchMouseEvent", {
+                        "type": "mouseMoved",
+                        "x": jitter_x,
+                        "y": jitter_y,
+                        "button": "left",
+                        "clickCount": 0,
+                        "buttons": 1,
+                        "pointerType": "mouse"
+                    })
+
+                time.sleep(rnd.uniform(0.3, 0.7))
+
+            # 6. 松开鼠标
+            cdp.send("Input.dispatchMouseEvent", {
+                "type": "mouseReleased",
+                "x": btn_x,
+                "y": btn_y,
+                "button": "left",
+                "clickCount": 1,
+                "buttons": 0,
+                "pointerType": "mouse"
+            })
+
+            print("  [Captcha] 松开，等待验证结果...")
+            time.sleep(5)
+
+            # 检查是否通过
+            title = page.title()
+            if '机器人' not in title:
+                print("  [Captcha] 验证通过!")
+                cdp.detach()
+                return True
+
+            cdp.detach()
             return False
 
-        try:
-            page.locator('[aria-label="新邮件"]').wait_for(timeout=32000)
-            return True
-        except:
-            print('[Error: Timeout] - 邮箱未初始化，无法正常收件。')
-            capture_page_state(page, "email_init_timeout")
+        except Exception as e:
+            print(f"[Debug] 长按异常: {e}")
             return False

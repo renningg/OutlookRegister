@@ -1,0 +1,22 @@
+{
+    "choose_browser": "geekez",
+    "geekez_debug_port": 9222,
+    "email_suffix": "@hotmail.com",
+    "proxy": "",
+    "bot_protection_wait": 11,
+    "max_captcha_retries": 2,
+    "concurrent_flows": 1,
+    "max_tasks": 1,
+    "oauth2": {
+        "enable_oauth2": false,
+        "client_id": "",
+        "redirect_url": "",
+        "Scopes": [
+            "offline_access",
+            "https://graph.microsoft.com/Mail.ReadWrite",
+            "https://graph.microsoft.com/Mail.Send",
+            "https://graph.microsoft.com/User.Read"
+        ]
+    },
+    "info": "使用 GeekEZ Browser 指纹浏览器。请先启动 GeekEZ 并开启远程调试端口，然后将端口号填入 geekez_debug_port 字段。"
+}

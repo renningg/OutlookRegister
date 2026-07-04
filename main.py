@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from utils import random_email, generate_strong_password
 from controllers.patchright_controller import PatchrightController
 from controllers.playwright_controller import PlaywrightController
+from controllers.geekez_controller import GeekEzController
 
 
 
@@ -94,12 +95,17 @@ if __name__ == "__main__":
     max_tasks = data["max_tasks"]
     concurrent_flows = data["concurrent_flows"]
 
-    if data["choose_browser"] =="patchright":
+    if data["choose_browser"] == "patchright":
         selected_controller = PatchrightController()
-    elif data["choose_browser"] =="playwright":
+    elif data["choose_browser"] == "playwright":
         selected_controller = PlaywrightController()
+    elif data["choose_browser"] == "geekez":
+        # 连接到 GeekEZ Browser
+        geekez_port = data.get("geekez_debug_port", 9222)
+        selected_controller = GeekEzController(debug_port=geekez_port)
     else:
-        print("不支持的浏览器类型，填写patchright或者playwright")
+        print("不支持的浏览器类型，填写 patchright、playwright 或 geekez")
+        exit(1)
   
 
     try:
