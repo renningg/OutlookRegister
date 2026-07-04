@@ -44,7 +44,7 @@ def bezier_curve(t, p0, p1, p2, p3):
 
 # ============ Chrome 启动 ============
 
-def start_chrome(user_data_dir, debug_port):
+def start_chrome(user_data_dir, debug_port, proxy=None):
     """启动 Chrome 实例"""
     # 先关闭旧的 Chrome
     subprocess.run(['pkill', '-f', f'remote-debugging-port={debug_port}'], 
@@ -63,6 +63,11 @@ def start_chrome(user_data_dir, debug_port):
         '--disable-blink-features=AutomationControlled',
         '--window-size=1280,800',
     ]
+    
+    if proxy:
+        launch_args.append(f'--proxy-server={proxy}')
+        launch_args.append('--proxy-bypass-list=127.0.0.1,localhost')
+        print(f"  使用代理: {proxy}")
     
     print(f"  启动 Chrome...")
     proc = subprocess.Popen(launch_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -92,166 +97,192 @@ def get_ws_url(debug_port):
 
 # ============ 验证码处理 ============
 
+from utils import check_captcha_type
+
+def _handle_longpress(page, cdp, btn_x, btn_y):
+    """PerimeterX 长按验证码 - 贝塞尔曲线模拟按住"""
+    start_x = random.randint(100, 400)
+    start_y = random.randint(100, 300)
+    cp1_x = start_x + (btn_x - start_x) * 0.3 + random.uniform(-50, 50)
+    cp1_y = start_y + (btn_y - start_y) * 0.3 + random.uniform(-50, 50)
+    cp2_x = start_x + (btn_x - start_x) * 0.7 + random.uniform(-50, 50)
+    cp2_y = start_y + (btn_y - start_y) * 0.7 + random.uniform(-50, 50)
+
+    steps = random.randint(20, 40)
+    for i in range(steps):
+        t = i / steps
+        x = bezier_curve(t, start_x, cp1_x, cp2_x, btn_x) + random.uniform(-2, 2)
+        y = bezier_curve(t, start_y, cp1_y, cp2_y, btn_y) + random.uniform(-2, 2)
+        cdp.send("Input.dispatchMouseEvent", {
+            "type": "mouseMoved", "x": x, "y": y,
+            "button": "none", "clickCount": 0, "pointerType": "mouse"
+        })
+        time.sleep(random.uniform(0.01, 0.05))
+
+    time.sleep(random.uniform(0.1, 0.3))
+    cdp.send("Input.dispatchMouseEvent", {
+        "type": "mousePressed", "x": btn_x, "y": btn_y,
+        "button": "left", "clickCount": 1, "buttons": 1, "pointerType": "mouse"
+    })
+
+    hold_time = random.uniform(10, 15)
+    start_time = time.time()
+    while time.time() - start_time < hold_time:
+        if random.random() < 0.2:
+            jx = btn_x + random.uniform(-3, 3)
+            jy = btn_y + random.uniform(-3, 3)
+            cdp.send("Input.dispatchMouseEvent", {
+                "type": "mouseMoved", "x": jx, "y": jy,
+                "button": "left", "clickCount": 0, "buttons": 1, "pointerType": "mouse"
+            })
+        time.sleep(random.uniform(0.3, 0.7))
+
+    cdp.send("Input.dispatchMouseEvent", {
+        "type": "mouseReleased", "x": btn_x, "y": btn_y,
+        "button": "left", "clickCount": 1, "buttons": 0, "pointerType": "mouse"
+    })
+    print("    [Captcha] 已松开，等待验证结果...")
+    time.sleep(5)
+
+def _handle_push_button(page, max_retries):
+    """PerimeterX push_button 验证码 - 点击内嵌按钮"""
+    for attempt in range(max_retries + 1):
+        print(f"    [Captcha] push_button 尝试 {attempt + 1}/{max_retries + 1}")
+        time.sleep(0.5)
+
+        try:
+            iframe1 = page.frame_locator('iframe[title="验证质询"]')
+            iframe2 = iframe1.frame_locator('iframe[style*="display: block"]')
+
+            loc = iframe2.locator('[aria-label="可访问性挑战"]')
+            box = loc.bounding_box()
+            if not box:
+                print("    [Captcha] 无可访问性挑战按钮，可能已经通过")
+                return True
+
+            x = box['x'] + box['width'] / 2 + random.randint(-10, 10)
+            y = box['y'] + box['height'] / 2 + random.randint(-10, 10)
+            page.mouse.click(x, y)
+            print(f"    [Captcha] 点击可访问性挑战")
+
+            loc2 = iframe2.locator('[aria-label="再次按下"]')
+            box2 = loc2.bounding_box()
+            if box2:
+                x2 = box2['x'] + box2['width'] / 2 + random.randint(-20, 20)
+                y2 = box2['y'] + box2['height'] / 2 + random.randint(-13, 13)
+                page.mouse.click(x2, y2)
+                print(f"    [Captcha] 点击再次按下")
+
+            # 等待验证结果
+            try:
+                page.locator('.draw').wait_for(state="detached", timeout=10000)
+                try:
+                    page.locator('[role="status"][aria-label="正在加载..."]').wait_for(timeout=5000)
+                    page.wait_for_timeout(8000)
+                    if page.get_by_text('一些异常活动').count() > 0:
+                        print("    [Captcha] 注册频率过快")
+                        return False
+                except:
+                    if page.get_by_text('取消').count() > 0:
+                        return True
+            except:
+                if page.get_by_text('取消').count() > 0:
+                    return True
+
+            time.sleep(2)
+            if check_captcha_type(page) == 'unknown':
+                print("    [Captcha] push_button 验证通过!")
+                return True
+
+        except Exception as e:
+            print(f"    [Captcha] push_button 异常: {e}")
+            if attempt < max_retries:
+                page.reload()
+                time.sleep(3)
+
+    return False
+
 def handle_captcha(page, max_retries=3):
     """
-    处理 PerimeterX 长按验证码
+    处理 PerimeterX 验证码（自动检测类型）
     返回: True=通过, False=失败
     """
-    from playwright.sync_api import sync_playwright
-    
-    for attempt in range(max_retries):
-        print(f"    [Captcha] 尝试 {attempt + 1}/{max_retries}")
-        
-        # 检查是否需要验证码
-        title = page.title()
-        if '机器人' not in title:
-            print(f"    [Captcha] 无需验证码")
-            return True
-        
-        # 获取验证质询 iframe 的位置
-        iframe_info = page.evaluate("""
-        () => {
-            const iframes = document.querySelectorAll('iframe');
-            for (const iframe of iframes) {
-                if (iframe.title === '验证质询') {
-                    const rect = iframe.getBoundingClientRect();
-                    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    # 等待验证码出现
+    for _ in range(15):
+        if '机器人' in page.title():
+            break
+        time.sleep(1)
+    else:
+        print("    [Captcha] 未检测到验证码，继续")
+        return True
+
+    captcha_type = check_captcha_type(page)
+    print(f"    [Captcha] 检测到类型: {captcha_type}")
+
+    if captcha_type == 'longpress':
+        cdp = page.context.new_cdp_session(page)
+        try:
+            iframe_info = page.evaluate("""
+            () => {
+                const iframes = document.querySelectorAll('iframe');
+                for (const iframe of iframes) {
+                    if (iframe.title === '验证质询') {
+                        const rect = iframe.getBoundingClientRect();
+                        return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+                    }
                 }
+                return null;
             }
-            return null;
-        }
-        """)
-        
-        if not iframe_info:
-            print(f"    [Captcha] 未找到验证质询 iframe")
-            # 尝试回退到原来的逻辑
-            try:
+            """)
+
+            if iframe_info:
+                btn_x = iframe_info['x'] + iframe_info['width'] / 2
+                btn_y = iframe_info['y'] + iframe_info['height'] - 30
+            else:
                 btn = page.locator('#human > div:first-child')
                 btn.wait_for(state='visible', timeout=5000)
                 box = btn.bounding_box()
-                if box:
-                    btn_x = box['x'] + box['width'] / 2
-                    btn_y = box['y'] + box['height'] / 2
-                else:
+                if not box:
+                    return False
+                btn_x = box['x'] + box['width'] / 2
+                btn_y = box['y'] + box['height'] / 2
+
+            print(f"    [Captcha] 按钮位置: x={btn_x:.0f}, y={btn_y:.0f}")
+
+            for attempt in range(max_retries):
+                print(f"    [Captcha] longpress 尝试 {attempt + 1}/{max_retries}")
+                _handle_longpress(page, cdp, btn_x, btn_y)
+                if '机器人' not in page.title():
+                    print("    [Captcha] 长按验证通过!")
+                    cdp.detach()
+                    return True
+                if attempt < max_retries - 1:
                     page.reload()
                     time.sleep(3)
-                    continue
-            except:
-                page.reload()
-                time.sleep(3)
-                continue
-        else:
-            btn_x = iframe_info['x'] + iframe_info['width'] / 2
-            btn_y = iframe_info['y'] + iframe_info['height'] - 30
-        
-        print(f"    [Captcha] 按钮位置: x={btn_x:.0f}, y={btn_y:.0f}")
-        
-        # 使用 CDP session
-        cdp = page.context.new_cdp_session(page)
-        
-        try:
-            # 1. 从随机位置开始移动
-            start_x = random.randint(100, 400)
-            start_y = random.randint(100, 300)
-            
-            # 2. 生成贝塞尔曲线控制点
-            cp1_x = start_x + (btn_x - start_x) * 0.3 + random.uniform(-50, 50)
-            cp1_y = start_y + (btn_y - start_y) * 0.3 + random.uniform(-50, 50)
-            cp2_x = start_x + (btn_x - start_x) * 0.7 + random.uniform(-50, 50)
-            cp2_y = start_y + (btn_y - start_y) * 0.7 + random.uniform(-50, 50)
-            
-            # 3. 沿贝塞尔曲线移动鼠标
-            steps = random.randint(20, 40)
-            for i in range(steps):
-                t = i / steps
-                x = bezier_curve(t, start_x, cp1_x, cp2_x, btn_x)
-                y = bezier_curve(t, start_y, cp1_y, cp2_y, btn_y)
-                x += random.uniform(-2, 2)
-                y += random.uniform(-2, 2)
-                
-                cdp.send("Input.dispatchMouseEvent", {
-                    "type": "mouseMoved",
-                    "x": x,
-                    "y": y,
-                    "button": "none",
-                    "clickCount": 0,
-                    "pointerType": "mouse"
-                })
-                time.sleep(random.uniform(0.01, 0.05))
-            
-            time.sleep(random.uniform(0.1, 0.3))
-            
-            # 4. 按下鼠标
-            cdp.send("Input.dispatchMouseEvent", {
-                "type": "mousePressed",
-                "x": btn_x,
-                "y": btn_y,
-                "button": "left",
-                "clickCount": 1,
-                "buttons": 1,
-                "pointerType": "mouse"
-            })
-            
-            # 5. 保持按住，偶尔微调位置
-            hold_time = random.uniform(10, 15)
-            start_time = time.time()
-            
-            while time.time() - start_time < hold_time:
-                if random.random() < 0.2:
-                    jitter_x = btn_x + random.uniform(-3, 3)
-                    jitter_y = btn_y + random.uniform(-3, 3)
-                    cdp.send("Input.dispatchMouseEvent", {
-                        "type": "mouseMoved",
-                        "x": jitter_x,
-                        "y": jitter_y,
-                        "button": "left",
-                        "clickCount": 0,
-                        "buttons": 1,
-                        "pointerType": "mouse"
-                    })
-                time.sleep(random.uniform(0.3, 0.7))
-            
-            # 6. 松开鼠标
-            cdp.send("Input.dispatchMouseEvent", {
-                "type": "mouseReleased",
-                "x": btn_x,
-                "y": btn_y,
-                "button": "left",
-                "clickCount": 1,
-                "buttons": 0,
-                "pointerType": "mouse"
-            })
-            
-            print(f"    [Captcha] 等待验证结果...")
-            time.sleep(5)
-            
-            # 检查结果
-            title = page.title()
-            if '机器人' not in title:
-                print(f"    [Captcha] 验证通过!")
-                cdp.detach()
-                return True
-            
-            print(f"    [Captcha] 验证失败，重试...")
+
             cdp.detach()
-            
-            # 刷新页面重试
-            if attempt < max_retries - 1:
-                page.reload()
-                time.sleep(3)
-                
+            return False
         except Exception as e:
-            print(f"    [Captcha] 异常: {e}")
+            print(f"    [Captcha] longpress 异常: {e}")
             try:
                 cdp.detach()
             except:
                 pass
-    
-    return False
+            return False
+
+    elif captcha_type == 'push_button':
+        return _handle_push_button(page, max_retries)
+
+    elif captcha_type == 'funcaptcha_iframe':
+        print("    [Captcha] FunCaptcha 无法自动处理")
+        return False
+
+    # unknown 或其他
+    return True
 
 # ============ 注册流程 ============
 
-def register_outlook(page, email, password):
+def register_outlook(page, browser, email, password):
     """
     执行 Outlook 注册流程
     返回: (success, email, password)
@@ -260,21 +291,40 @@ def register_outlook(page, email, password):
     print(f"  密码: {password}")
     
     try:
+        # 监听新页面/弹窗
+        popup_handler = None
+        def on_popup(popup):
+            nonlocal popup_handler
+            popup_handler = popup
+            print(f"  [弹窗] 检测到新页面: {popup.url}")
+        page.on('popup', on_popup)
+        
         # 1. 导航到注册页面
         print("  [1/6] 导航到注册页面...")
         page.goto("https://outlook.live.com/mail/0/?prompt=create_account", 
                   timeout=30000, wait_until="domcontentloaded")
-        time.sleep(3)
+        time.sleep(4)
         
-        # 处理"同意并继续"
-        try:
-            agree_btn = page.get_by_text('同意并继续')
-            if agree_btn.count() > 0:
-                print("  [2/6] 点击'同意并继续'...")
-                agree_btn.click()
-                time.sleep(3)
-        except:
-            pass
+        # 处理"同意并继续"（可能多次出现：隐私协议 + 数据导出许可）
+        for agree_try in range(10):
+            cur_title = page.title()
+            try:
+                agree_btn = page.get_by_text('同意并继续')
+                if agree_btn.count() > 0 and agree_btn.first.is_visible():
+                    print(f"  [2/6] 点击'同意并继续' (第{agree_try+1}次)...")
+                    print(f"    当前标题: {cur_title}")
+                    agree_btn.first.click()
+                    time.sleep(3)
+                    continue
+            except:
+                pass
+            
+            # 检查 email 输入框是否可见（表示同意流程已完成）
+            if page.locator('[aria-label="新建电子邮件"]').count() > 0:
+                break
+            time.sleep(1)
+        
+        print(f"    最终标题: {page.title()}")
         
         # 2. 输入邮箱
         print("  [3/6] 输入邮箱...")
@@ -351,26 +401,83 @@ def register_outlook(page, email, password):
             next_btn.click()
             time.sleep(5)
         
-        # 6. 处理验证码
-        print("  [验证码] 处理中...")
+        # 6. 等待并处理验证码
+        print("  [验证码] 等待验证码出现...")
+        time.sleep(5)
         captcha_result = handle_captcha(page, max_retries=3)
         
         if captcha_result:
-            # 处理"同意并继续"
-            try:
-                agree_btn = page.get_by_text('同意并继续')
-                if agree_btn.count() > 0:
-                    agree_btn.click()
-                    time.sleep(3)
-            except:
-                pass
+            print("  [等待] 验证码通过，等待页面跳转...")
+            time.sleep(5)  # 给页面足够时间过渡
             
-            # 检查是否注册成功
-            title = page.title()
-            url = page.url
-            if 'login.live.com' in url or 'outlook.live.com' in url:
-                print(f"  ✓ 注册成功!")
-                return True, email, password
+            # 循环检查直到进入收件箱或超时
+            for check_step in range(90):  # 最多等 90 秒
+                current_url = page.url
+                current_title = page.title()
+                
+                # 判断注册成功的唯一标准：进入邮箱
+                if 'outlook.live.com/mail' in current_url or '收件箱' in current_title:
+                    print(f"  ✅ 注册成功！已进入收件箱!")
+                    return True, email, password
+                
+                # 检查是否有弹窗页面
+                if popup_handler:
+                    try:
+                        popup_url = popup_handler.url
+                        popup_title = popup_handler.title()
+                        print(f"  [弹窗] URL: {popup_url}, Title: {popup_title}")
+                        if 'outlook.live.com/mail' in popup_url or '收件箱' in popup_title:
+                            print(f"  ✅ 注册成功（弹窗中已进入收件箱）!")
+                            return True, email, password
+                    except:
+                        pass
+                
+                # 检查当前 browser contexts 中是否有其他页面已进入收件箱
+                try:
+                    for ctx in browser.contexts:
+                        for p in ctx.pages:
+                            if 'outlook.live.com/mail' in p.url or '收件箱' in p.title():
+                                print(f"  ✅ 注册成功（其他页面已进入收件箱）!")
+                                return True, email, password
+                except:
+                    pass
+                
+                # 处理"同意并继续"弹窗（个人数据导出许可）
+                try:
+                    agree_btn = page.get_by_text('同意并继续')
+                    if agree_btn.count() > 0:
+                        print(f"  [数据导出] 点击'同意并继续'...")
+                        agree_btn.first.click(force=True, timeout=5000)
+                        time.sleep(5)
+                        print(f"    点击后 URL: {page.url}")
+                        print(f"    点击后 Title: {page.title()}")
+                        continue
+                    else:
+                        if check_step % 10 == 0:
+                            btns = page.evaluate("() => Array.from(document.querySelectorAll('button')).map(b => b.textContent.trim())")
+                            print(f"  [调试] 当前页面按钮: {btns}")
+                except Exception as e:
+                    print(f"  [数据导出点击异常] {e}")
+                    pass
+                
+                # 检测是否触发验证码
+                if '机器人' in current_title:
+                    print("  [验证码] 再次检测到验证码，重新处理...")
+                    captcha_result = handle_captcha(page, max_retries=3)
+                    if not captcha_result:
+                        break
+                    continue
+                
+                # 检测是否被限制
+                if '一些异常活动' in current_title or 'rate' in current_url.lower():
+                    print("  ✗ IP 被限制")
+                    break
+                
+                time.sleep(1)
+            else:
+                print(f"  ✗ 注册失败 - 超时未进入收件箱")
+                print(f"    最终 URL: {page.url}")
+                print(f"    最终标题: {page.title()}")
         
         print(f"  ✗ 注册失败")
         return False, email, password
@@ -406,7 +513,8 @@ def main():
     
     # 配置
     debug_port = 24000
-    max_attempts = 10  # 尝试次数
+    max_attempts = 1  # 先试 1 次验证修复
+    proxy = None  # 使用系统代理
     
     from playwright.sync_api import sync_playwright
     
@@ -428,7 +536,7 @@ def main():
         os.makedirs(user_data_dir, exist_ok=True)
         
         # 启动 Chrome
-        proc = start_chrome(user_data_dir, debug_port)
+        proc = start_chrome(user_data_dir, debug_port, proxy)
         if not proc:
             print("  Chrome 启动失败，跳过")
             fail_count += 1
@@ -453,7 +561,7 @@ def main():
                 page = contexts[0].pages[0]
                 
                 # 执行注册
-                success, email, password = register_outlook(page, email, password)
+                success, email, password = register_outlook(page, browser, email, password)
                 
                 if success:
                     success_count += 1
