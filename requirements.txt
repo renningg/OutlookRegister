@@ -3,3 +3,4 @@ requests
 playwright==1.53.0
 patchright
 beautifulsoup4
+pyautogui
